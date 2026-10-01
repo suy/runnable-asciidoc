@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+#
+# Converts an AsciiDoc document to an interactive shell script, using the
+# "runnable" Asciidoctor backend in lib/ next to this script.
+#
+# Usage: bin/runnable-asciidoc [-o output.sh] document.adoc
+# (all other options pass through to asciidoctor)
+
+set -e
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+
+# The asciidoctor gem must be loadable; if the default gem path does not
+# have it, fall back to a conventional user gem home.
+if ! ruby -e 'require "asciidoctor"' 2> /dev/null; then
+  export GEM_HOME="${GEM_HOME:-$HOME/local/gems}"
+fi
+
+exec asciidoctor \
+  -r "$script_dir/../lib/runnable-asciidoc" \
+  -b runnable \
+  "$@"

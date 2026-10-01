@@ -1,0 +1,103 @@
+= Runnable AsciiDoc
+
+An https://asciidoctor.org[Asciidoctor] custom backend that converts an
+AsciiDoc document into an interactive shell script.
+
+Write a document like a tutorial or a setup guide. The prose explains, and the
+`[source,bash]` blocks do. Convert the document, run the generated script, and
+it walks you through: it prints the text up to the next block, shows what it is
+about to run, executes the block, and stops. You continue, skip, re-run, or
+quit. Progress is saved; a later run resumes where you stopped.
+
+The document stays the source of truth. The script is a disposable artifact:
+regenerate it whenever the document changes.
+
+== Quick start
+
+[source,console]
+----
+$ bin/runnable-asciidoc -o setup.sh doc.adoc
+$ ./setup.sh
+----
+
+The generated script understands a few flags:
+
+[cols="1,3"]
+|===
+|Flag |Effect
+
+|_(none)_
+|Interactive: stop after each block, offer resume on the next run.
+
+|--list
+|Print the runnable blocks and exit. Nothing runs.
+
+|--yes
+|Run all pending blocks without stopping; abort at the first failure.
+
+|--reset
+|Discard saved progress.
+
+|--help
+|Print usage.
+|===
+
+== How blocks are treated
+
+* `[source,bash]` (also `sh`, `shell`, `zsh`) becomes a runnable function.
+* `opts=norun` in the block attributes keeps a block from running; it is
+  printed as context, marked "(not run)".
+* Any other language (`python`, `ruby`, ...) is printed as context, marked
+  "(language, not run)". Only shell runs; other languages would run without
+  shared state, which does not fit the model.
+* Blocks share one shell. A `cd` or a variable from an earlier block is still
+  in effect later, like pasting the whole document into a terminal.
+
+== Writing documents
+
+No new syntax. Normal AsciiDoc, with two habits that help:
+
+* Put the explanation *before* the block. The script shows the text, then
+  offers to run the block that follows it.
+* Mark illustration-only snippets with `opts=norun`, so nobody executes them
+  by accident.
+
+Headings, paragraphs, lists, admonitions, and inline markup (`*bold*`,
+`` `code` ``, links) are rendered as plain terminal text. Images, tables, and
+formulas are replaced by a pointer back to the document. A script is not the
+place for them.
+
+== Design notes
+
+* The generated script runs each block as a normal shell function. A block
+  that ends with `exit` therefore ends the whole script — the same thing that
+  happens when you paste `exit` into a terminal. Blocks are expected to fail
+  or succeed; only the exit status of the block matters, and `set -e` is
+  deliberately not used.
+* Progress is one line per block in `<script>.progress`, next to the script.
+  States: `done`, `skipped`, `failed`. Failed blocks are offered again on the
+  next run.
+* The script never edits the system beyond what its blocks do. The only file
+  it creates by itself is the progress file.
+
+== Requirements
+
+* asciidoctor (tested with 2.0.x). A Ruby, any recent one.
+* bash, to run the generated scripts.
+
+== Development
+
+[source,console]
+----
+$ ruby test/auto/run.rb
+----
+
+The tests convert documents, syntax-check the generated scripts with
+`bash -n`, and drive them through runs, failures, skips, and resumes. They
+need the `GEM_HOME` that has asciidoctor; minitest ships with Ruby, so there
+is nothing else to install.
+
+== Status
+
+Highly experimental, first working version (2026-10-01) entirely written by an
+agent. Expect rough edges.

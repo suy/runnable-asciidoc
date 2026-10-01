@@ -1,0 +1,80 @@
+= Project Setup Guide
+Alex Exojo
+:project: demo
+
+This guide walks through building the demo project.
+Read each step, run the block, and check the output before continuing.
+
+== Preparation
+
+Make sure you are in a scratch directory you can delete later.
+
+[source,bash]
+----
+mkdir -p /tmp/demo-build
+cd /tmp/demo-build
+----
+
+The build directory now exists.
+Note that `cd` inside the block affects the script, not your shell.
+
+== Configuration
+
+Create the configuration file.
+
+[source,bash]
+----
+cat > demo.conf <<'CONFIG'
+name = demo
+verbose = no
+CONFIG
+ls -la
+----
+
+Check that `demo.conf` looks right.
+
+[NOTE]
+Blocks share one shell, so files created earlier are still visible.
+
+== Building
+
+Run the build.
+
+[source,bash]
+----
+gcc --version > compiler.txt
+wc -l compiler.txt
+----
+
+This one is expected to fail — the demo command does not exist.
+
+[source,bash]
+----
+some-nonexistent-command --help
+----
+
+You can re-run it, or continue anyway.
+
+== Reference
+
+An illustration that is not meant to run:
+
+[source,bash,opts=norun]
+----
+curl https://example.org | jq .
+----
+
+And a Python snippet, also context only:
+
+[source,python]
+----
+print("hello")
+----
+
+Unlabeled block, also context only:
+
+----
+plain text
+----
+
+That is all.
