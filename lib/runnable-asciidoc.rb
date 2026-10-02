@@ -16,6 +16,9 @@
 #   (no flags)  interactive: stop after each block
 #   --list      show the runnable blocks and exit, running nothing
 #   --yes       run all pending blocks, stop at the first failure
+#   --no-prose  hide the prose; keep headings, titles, and code
+#   --color     force colors on (default: on for a terminal, off for a pipe)
+#   --no-color  force colors off
 #   --reset     discard saved progress
 #   --help      show usage
 
@@ -59,6 +62,26 @@ module RunnableAsciidoc
       chunks
     end
   end
+
+  # ANSI escape sequences for the generated script's output. Emitted as
+  # generation-time constants and printed only through runtime functions
+  # that check tty-ness (RUNNABLE_COLOR_ENABLED is set once, in main), so
+  # redirects and pipes stay clean.
+  COLORS = {
+    bold: '1',
+    yellow: '33',
+    red: '31'
+  }.freeze
+
+  COLORS.each do |name, code|
+    define_method("color_#{name}") { format("\e[%sm", code) }
+    module_function "color_#{name}"
+  end
+
+  def color_reset
+    "\e[0m"
+  end
+  module_function :color_reset
 end
 
 class RunnableConverter
@@ -69,6 +92,8 @@ class RunnableConverter
   RUNNABLE_LANGUAGES = %w[sh bash zsh shell].freeze
   # Terminal width used when wrapping prose.
   PROSE_WIDTH = 78
+  # Width of the horizontal rule framing a block offer.
+  RULE_WIDTH = 60
 
   def initialize(backend, opts = {})
     super
@@ -423,13 +448,17 @@ class RunnableConverter
     index = @blocks.size + 1
     function = RunnableAsciidoc.block_function_name index
     first_line = node.source.each_line.first.to_s.chomp
-    # The hint (shown by --list and before each block) prefers the title:
-    # it is the author's description of the block, and it survives
-    # --no-prose, unlike the prose around the block.
+    # The hint shown by --list prefers the title: it is the author's
+    # description of the block. The banner before a block shows the title
+    # alone (runnable_block_title), so the fallback first line matters
+    # only for untitled blocks in --list.
     hint = node.title || first_line
     @blocks << { function: function, first_line: first_line, hint: hint,
-                 source: node.source }
+                 title: node.title, source: node.source }
 
+    # The banner shows the title of a titled block; the same line in the
+    # context would print it twice in a row.
+    @context_lines.pop if node.title && @context_lines.last == print_call(node.title)
     @chunks << { context: @context_lines, block: function }
     @context_lines = []
 
@@ -451,6 +480,7 @@ class RunnableConverter
 
     script = +''
     script << preamble(title, docfile)
+    script << color_constants
     @chunks.each_with_index do |chunk, index|
       # Numbering is a contract with the driver (context N introduces block
       # N), so every chunk gets a function. An empty body would not parse;
@@ -471,6 +501,27 @@ class RunnableConverter
     script << block_metadata_functions
     script << driver(title)
     script
+  end
+
+  # Generation-time ANSI constants, one per color the runtime functions use.
+  # The runtime functions are the only users, so adding a new color means
+  # adding it here and to RunnableAsciidoc::COLORS.
+  def color_constants
+    lines = +"\n"
+    {
+      'BOLD' => RunnableAsciidoc.color_bold,
+      'YELLOW' => RunnableAsciidoc.color_yellow,
+      'RED' => RunnableAsciidoc.color_red,
+      'RESET' => RunnableAsciidoc.color_reset
+    }.each do |suffix, sequence|
+      lines << "RUNNABLE_COLOR_#{suffix}=$'\\e[#{sequence_code(sequence)}m'\n"
+    end
+    lines
+  end
+
+  # The SGR parameter of an escape sequence built by the color_* helpers.
+  def sequence_code(sequence)
+    sequence[/\e\[(\d+)m/, 1]
   end
 
   def preamble(title, docfile)
@@ -494,6 +545,10 @@ class RunnableConverter
 
       runnable_print_code() { # $1: line of code being echoed
         printf '    %s\\n' "$1"
+      }
+
+      runnable_rule() { # fixed-width horizontal rule framing a block offer
+        printf '%s\n' '╋#{"━" * RULE_WIDTH}'
       }
 
       runnable_ask() { # $1: prompt; returns 0 enter, 13 skip, 14 re-run, 17 quit
@@ -536,6 +591,49 @@ class RunnableConverter
       runnable_show_progress() {
         printf '  %d/%d finished\\n' "$RUNNABLE_FINISHED" "$RUNNABLE_TOTAL"
       }
+
+      # ---- color -------------------------------------------------------------
+
+      # True when colors should be enabled: stdout is a terminal, TERM is
+      # set, and TERM is not 'dumb'. Checked once in main; when false, all
+      # color functions below print empty strings and output is plain text.
+      runnable_use_color() {
+        [ -t 1 ] && [ -n "${TERM:-}" ] && [ "${TERM:-}" != dumb ]
+      }
+
+      runnable_color_reset() { # $RUNNABLE_COLOR_ENABLED: 1 to emit the code
+        [ "$RUNNABLE_COLOR_ENABLED" -eq 1 ] && printf '\e[0m'
+      }
+
+      runnable_color_bold() {
+        [ "$RUNNABLE_COLOR_ENABLED" -eq 1 ] && printf '\e[1m'
+      }
+
+      runnable_color_yellow() {
+        [ "$RUNNABLE_COLOR_ENABLED" -eq 1 ] && printf '\e[33m'
+      }
+
+      runnable_color_red() {
+        [ "$RUNNABLE_COLOR_ENABLED" -eq 1 ] && printf '\e[31m'
+      }
+
+      # A runtime-checked colored string (plain when colors are off).
+      # Applies RUNNABLE_COLOR_CHOICE: 2 = auto (tty detection), 1 = on,
+      # 0 = off. Called from the --list branch and after flag parsing.
+      runnable_apply_color_choice() {
+        RUNNABLE_COLOR_ENABLED=0
+        if [ "$RUNNABLE_COLOR_CHOICE" -eq 2 ]; then
+          runnable_use_color && RUNNABLE_COLOR_ENABLED=1
+        else
+          RUNNABLE_COLOR_ENABLED=$RUNNABLE_COLOR_CHOICE
+        fi
+      }
+
+      runnable_paint() { # $1: color function name, $2: text
+        local color_reset
+        color_reset=$(runnable_color_reset)
+        printf '%s%s%s' "$("$1")" "$2" "$color_reset"
+      }
     SH
   end
 
@@ -546,10 +644,12 @@ class RunnableConverter
     return '' if @blocks.empty?
     lines = +<<~'SH'
       runnable_show_list() {
-        printf '%s\n' 'Runnable blocks:'
+        printf '%s\n' "$(runnable_paint runnable_color_bold 'Runnable blocks:')"
         local index
         for ((index = 1; index <= RUNNABLE_LIST_TOTAL; index++)); do
-          printf '  block_%02d: %s\n' "$index" "$(runnable_block_hint "$(printf 'block_%02d' "$index")")"
+          printf '  %s %s\n' \
+            "$(runnable_paint runnable_color_bold "$(printf 'block_%02d:' "$index")")" \
+            "$(runnable_block_hint "$(printf 'block_%02d' "$index")")"
         done
       }
 
@@ -559,6 +659,18 @@ class RunnableConverter
     @blocks.each do |block|
       hint = RunnableAsciidoc.shell_single_quoted(block[:hint])
       lines << "          #{block[:function]}) printf '%s\\n' #{hint} ;;\n"
+    end
+    lines << "        esac\n"
+    lines << "      }\n\n"
+
+    lines << <<~'SH'
+      runnable_block_title() { # $1: function name; prints its title, if any
+        case $1 in
+    SH
+    @blocks.each do |block|
+      next unless block[:title]
+      title = RunnableAsciidoc.shell_single_quoted(block[:title])
+      lines << "          #{block[:function]}) printf '%s\\n' #{title} ;;\n"
     end
     lines << "        esac\n"
     lines << "      }\n\n"
@@ -592,12 +704,13 @@ class RunnableConverter
             RUNNABLE_FINISHED=$((RUNNABLE_FINISHED + 1))
           else
             runnable_record "$name" failed
-            printf '  Block failed with exit status %d.\\n' "$status"
+            printf '%s\\n' "$(runnable_paint runnable_color_red "  Block failed with exit status $status.")"
           fi
           if [ "$RUNNABLE_ASSUME_YES" -eq 1 ]; then
             [ "$status" -eq 0 ] && return 0 || return 2
           fi
-          runnable_ask '  [r] re-run · [Enter] continue · [q] quit > '
+          printf '\\n'
+          runnable_ask '  '"$(runnable_paint runnable_color_bold '[r] re-run · [Enter] continue · [q] quit > ')"
           case $? in
             14) continue ;;
             17) return 2 ;;
@@ -615,18 +728,28 @@ class RunnableConverter
     parts << <<~SH
 
       usage() {
-        printf '%s\\n' "usage: $0 [--list | --yes | --no-prose | --reset | --help]"
+        printf '%s\\n' "usage: $0 [--list | --yes | --no-prose | --color | --no-color | --reset | --help]"
       }
 
       main() {
         RUNNABLE_ASSUME_YES=0
         RUNNABLE_SHOW_PROSE=1
+        # Set before flag parsing: --list returns from inside the loop,
+        # and the paint functions must never see an unbound variable.
+        RUNNABLE_COLOR_ENABLED=0
+        RUNNABLE_COLOR_CHOICE=2
         RUNNABLE_SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
         while [ "$#" -gt 0 ]; do
           case $1 in
-            --list) runnable_show_list; return 0 ;;
+            --list)
+              runnable_apply_color_choice
+              runnable_show_list
+              return 0
+              ;;
             --yes) RUNNABLE_ASSUME_YES=1 ;;
             --no-prose) RUNNABLE_SHOW_PROSE=0 ;;
+            --color) RUNNABLE_COLOR_CHOICE=1 ;;
+            --no-color) RUNNABLE_COLOR_CHOICE=0 ;;
             --reset)
               rm -f "$(runnable_progress_file)"
               printf '%s\\n' 'Progress cleared.'
@@ -638,10 +761,12 @@ class RunnableConverter
           shift
         done
 
+        runnable_apply_color_choice
+
         RUNNABLE_TOTAL=#{total}
         RUNNABLE_FINISHED=0
 
-        printf '%s\\n' #{RunnableAsciidoc.shell_single_quoted("=== #{title} ===")}
+        printf '%s\\n' "$(runnable_paint runnable_color_bold #{RunnableAsciidoc.shell_single_quoted("=== #{title} ===")})"
     SH
 
     if total.zero?
@@ -664,17 +789,22 @@ class RunnableConverter
               continue
             fi
             runnable_context_$(printf '%02d' "$index")
-            printf '%s\\n' "+ block $index/$RUNNABLE_TOTAL: $(runnable_block_hint "$name")"
+            runnable_rule
+            local block_title
+            block_title=$(runnable_block_title "$name")
+            printf '%s\\n' "$(runnable_paint runnable_color_bold "┃ block $index/$RUNNABLE_TOTAL:") $block_title"
+            runnable_rule
             runnable_block_source "$name"
+            runnable_rule
             if [ "$RUNNABLE_ASSUME_YES" -eq 0 ]; then
-              runnable_ask '  [Enter] run · [s] skip · [q] quit > '
+              runnable_ask '  '"$(runnable_paint runnable_color_bold '[Enter] run · [s] skip · [q] quit > ')"
               case $? in
                 13)
                   runnable_record "$name" skipped
                   continue
                   ;;
                 17)
-                  printf '%s\\n' "Stopped before block $index. Run this script again to resume."
+                  printf '%s\\n' "$(runnable_paint runnable_color_yellow "Stopped before block $index. Run this script again to resume.")"
                   return 0
                   ;;
               esac
@@ -682,7 +812,7 @@ class RunnableConverter
             run_block "$name"
             case $? in
               2)
-                printf '%s\\n' "Stopped after block $index. Run this script again to resume."
+                printf '%s\\n' "$(runnable_paint runnable_color_yellow "Stopped after block $index. Run this script again to resume.")"
                 return 0
                 ;;
             esac
@@ -693,7 +823,7 @@ class RunnableConverter
           runnable_context_#{format('%02d', total + 1)}
           failures=$(awk '$2 == "failed" { count++ } END { print count + 0 }' "$(runnable_progress_file)")
           if [ "$failures" -gt 0 ]; then
-            printf '%s\\n' "$failures block(s) failed; they will be offered again next run."
+            printf '%s\\n' "$(runnable_paint runnable_color_red "$failures block(s) failed; they will be offered again next run.")"
           else
             printf '%s\\n' 'All blocks handled.'
           fi
