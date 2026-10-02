@@ -647,6 +647,14 @@ class RunnableConverter
         printf '%s\n' '╋#{"━" * RULE_WIDTH}'
       }
 
+      runnable_working_directory() { # directory label for block headers, ~-abbreviated
+        local directory=${PWD#"${HOME:-}"}
+        if [ "$directory" != "$PWD" ]; then
+          directory=~$directory
+        fi
+        printf '%s' "$directory"
+      }
+
       runnable_ask() { # $1: prompt; returns 0 enter, 13 skip, 14 re-run, 17 quit
         local reply
         printf '%s' "$1"
@@ -801,6 +809,7 @@ class RunnableConverter
             [ "$status" -eq 0 ] && return 0 || return 2
           fi
           printf '\\n'
+          runnable_print "  in $(runnable_working_directory)"
           runnable_ask '  '"$(runnable_paint runnable_color_bold '[r] re-run · [Enter] continue · [q] quit > ')"
           case $? in
             14) continue ;;
@@ -883,6 +892,7 @@ class RunnableConverter
             local block_title
             block_title=$(runnable_block_title "$name")
             printf '%s\\n' "$(runnable_paint runnable_color_bold "┃ block $index/$RUNNABLE_TOTAL:") $block_title"
+            runnable_print "  in $(runnable_working_directory)"
             runnable_rule
             runnable_block_source "$name"
             runnable_rule

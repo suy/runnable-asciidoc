@@ -223,7 +223,7 @@ class ConversionTest < Minitest::Test
   def test_block_source_is_echoed_before_running
     out, _status = run_script @script, args: ['--yes']
     # The whole code, indented, shows before the block output.
-    assert_match(/┃ block 1\/2[^\n]*\n╋━+\n    echo one\n╋━+\none\n/, out)
+    assert_match(/┃ block 1\/2[^\n]*\n  in [^\n]*\n╋━+\n    echo one\n╋━+\none\n/, out)
   end
 
   def test_multiline_block_source_is_echoed_verbatim
@@ -242,6 +242,34 @@ class ConversionTest < Minitest::Test
     out, _status = run_script script, args: ['--yes']
     assert_includes out, "    echo done\n"
   end
+
+def test_header_shows_working_directory_below_banner
+  out, _status = run_script @script, args: ['--yes']
+  banner_position = out.index('┃ block 1/')
+  directory_position = out.index("  in #{Dir.pwd}\n")
+  refute_nil banner_position
+  refute_nil directory_position
+  assert_operator banner_position, :<, directory_position
+end
+
+def test_directory_line_reflects_cd_from_previous_block
+  doc = <<~ADOC
+    = Mover
+
+    [source,bash]
+    ----
+    cd /
+    ----
+
+    [source,bash]
+    ----
+    pwd
+    ----
+  ADOC
+  script = convert doc
+  out, _status = run_script script, args: ['--yes']
+  assert_includes out, "  in /\n"
+end
 
   def test_full_run_and_resume
     out, status = run_script @script, stdin: "\n\n"
