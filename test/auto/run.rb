@@ -220,7 +220,7 @@ class ConversionTest < Minitest::Test
   def test_block_source_is_echoed_before_running
     out, _status = run_script @script, args: ['--yes']
     # The whole code, indented, shows before the block output.
-    assert_match(/\+ block 1\/2[^\n]*\n    echo one\n─+\none\n/, out)
+    assert_match(/┃ block 1\/2[^\n]*\n╋━+\n    echo one\n╋━+\none\n/, out)
   end
 
   def test_multiline_block_source_is_echoed_verbatim
@@ -412,12 +412,12 @@ class ColorTest < Minitest::Test
 
   def test_forced_color_adds_codes_despite_pipe
     out, _status = run_script @script, args: ['--color', '--yes']
-    assert_includes out, "\e[1m+ block 1/1:"
+    assert_includes out, "\e[1m┃ block 1/1:"
   end
 
   def test_banner_has_no_hint_for_untitled_block
     out, _status = run_script @script, args: ['--color', '--yes']
-    assert_includes out, "\e[1m+ block 1/1:\e[0m\n"
+    assert_includes out, "\e[1m┃ block 1/1:\e[0m \n"
     refute_match(/ block 1\/1:.*echo/, out)
   end
 
@@ -433,8 +433,8 @@ class ColorTest < Minitest::Test
     ADOC
     script = convert doc
     out, _status = run_script script, args: ['--yes']
-    assert_includes out, "+ block 1/1: Build the demo"
-    refute_includes out, "Build the demo\n+ block 1/1"
+    assert_includes out, "┃ block 1/1: Build the demo"
+    refute_includes out, "Build the demo\n┃ block 1/1"
   end
 
   def test_failure_line_is_painted_red_when_forced
@@ -447,7 +447,7 @@ class ColorTest < Minitest::Test
 
   def test_prompt_painted_bold_on_tty
     out, _status = PtyRun.run @script, answers: ['', 'q']
-    assert_includes out, "\e[1m+ block 1/1:"
+    assert_includes out, "\e[1m┃ block 1/1:"
     assert_includes out, "\e[1m[Enter] run · [s] skip · [q] quit > "
     refute_match(/ block 1\/1:.*things/, out) # untitled: no hint in banner
     assert_includes out, 'things' # the block still runs
