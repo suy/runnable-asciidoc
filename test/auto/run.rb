@@ -7,6 +7,7 @@
 # Run with: ruby test/auto/run.rb (minitest ships with Ruby; no gems needed)
 
 require 'minitest/autorun'
+require 'json'
 require 'tmpdir'
 require 'open3'
 require 'fileutils'
@@ -22,21 +23,22 @@ require LIB
 # Converts an AsciiDoc string through the runnable backend. Returns the
 # generated script path; the sandbox directory stays in @dir and is
 # removed when the test process exits.
-def convert(adoc, name = 'doc.adoc')
+def convert(adoc, name = 'doc.adoc', backend: 'runnable')
   @dir = Dir.mktmpdir
   Minitest.after_run { FileUtils.remove_entry(@dir) if File.exist?(@dir) }
   source = File.join(@dir, name)
   File.write(source, adoc)
-  script = File.join(@dir, "#{File.basename(name, '.adoc')}.sh")
+  suffix = backend == 'runnable' ? 'sh' : 'json'
+  output = File.join(@dir, "#{File.basename(name, '.adoc')}.#{suffix}")
   _out, error, status = Open3.capture3(
     { 'GEM_HOME' => ENV['GEM_HOME'] }.compact,
     'ruby', '-I', File.dirname(LIB), '-rasciidoctor',
     '-r', LIB, '-e',
     "Asciidoctor.convert_file #{source.inspect}, " \
-    "backend: 'runnable', safe: :unsafe, to_file: #{script.inspect}, mkdirs: true"
+    "backend: #{backend.inspect}, safe: :unsafe, to_file: #{output.inspect}, mkdirs: true"
   )
   flunk "conversion failed:\n#{error}" unless status.success?
-  script
+  output
 end
 
 # Runs the generated script with the given stdin, returns [stdout, status].
@@ -89,46 +91,47 @@ end
     ----
   ADOC
 
+SAMPLE = <<~ADOC
+  = Sample
+  :project: xyz
+
+  Intro prose with *bold*, `code`, and a link:https://example.org[site].
+
+  == First
+
+  Before text.
+
+  [source,bash]
+  ----
+  echo one
+  ----
+
+  == Second
+
+  [source,bash,opts=norun]
+  ----
+  echo not-run
+  ----
+
+  [source,python]
+  ----
+  print("py")
+  ----
+
+  ----
+  unlabeled
+  ----
+
+  [source,bash]
+  .Do things
+  ----
+  echo two
+  ----
+
+  Closing prose.
+ADOC
+
 class ConversionTest < Minitest::Test
-  SAMPLE = <<~ADOC
-    = Sample
-    :project: xyz
-
-    Intro prose with *bold*, `code`, and a link:https://example.org[site].
-
-    == First
-
-    Before text.
-
-    [source,bash]
-    ----
-    echo one
-    ----
-
-    == Second
-
-    [source,bash,opts=norun]
-    ----
-    echo not-run
-    ----
-
-    [source,python]
-    ----
-    print("py")
-    ----
-
-    ----
-    unlabeled
-    ----
-
-    [source,bash]
-    .Do things
-    ----
-    echo two
-    ----
-
-    Closing prose.
-  ADOC
 
   def setup
     @script = convert SAMPLE
@@ -337,6 +340,68 @@ class ConversionTest < Minitest::Test
     assert status.success?
   end
 end
+# Tests for the "runnable-json" backend: the JSON document a graphical
+# viewer consumes. The contract under test is the schema, not presentation.
+class JsonBackendTest < Minitest::Test
+  def setup
+    @json = convert SAMPLE, 'doc.adoc', backend: 'runnable-json'
+  end
+
+  def test_output_is_valid_json_with_schema_version
+    data = JSON.parse(File.read(@json))
+    assert_equal 1, data['version']
+    assert_equal 'Sample', data['title']
+  end
+
+  def test_steps_pair_context_with_blocks
+    data = JSON.parse(File.read(@json))
+    steps = data['steps']
+    assert_equal 3, steps.size # block one, block two, tail
+
+    first = steps[0]
+    assert_equal 'prose', first['context'].first['kind']
+    assert_equal 'Intro prose with bold, code, and a site (https://example.org).',
+                 first['context'].first['text']
+    assert_equal 'heading', first['context'][1]['kind']
+    assert_equal 1, first['context'][1]['level']
+    assert_equal 'First', first['context'][1]['text']
+    assert_equal ['echo one'], first['block']['source']
+
+    second = steps[1]
+    kinds = second['context'].map { |item| item['kind'] }
+    assert_includes kinds, 'code'
+    note_items = second['context'].select { |item| item['note'] }
+    assert_includes note_items.map { |item| item['note'] }, '(not run)'
+    assert_includes note_items.map { |item| item['note'] }, '(python, not run)'
+    assert_equal 'Do things', second['block']['title']
+    assert_equal 'Do things', second['block']['hint']
+
+    tail = steps[2]
+    assert_nil tail['block']
+    assert_equal 'prose', tail['context'].last['kind']
+    assert_equal 'Closing prose.', tail['context'].last['text']
+  end
+
+  def test_document_with_no_blocks_has_a_single_tail_step
+    doc = <<~ADOC
+      = Nothing
+      Just prose.
+    ADOC
+    json = convert doc, 'nothing.adoc', backend: 'runnable-json'
+    data = JSON.parse(File.read(json))
+    assert_equal 1, data['steps'].size
+    assert_nil data['steps'].first['block']
+  end
+
+  def test_example_document_converts_to_valid_json
+    example = File.join(PROJECT, 'examples', 'setup-guide.adoc')
+    json = convert File.read(example), 'setup-guide.adoc', backend: 'runnable-json'
+    data = JSON.parse(File.read(json))
+    assert_equal 1, data['version']
+    assert data['steps'].size >= 2
+  end
+end
+
 class ShellQuotingTest < Minitest::Test
   def test_plain_text
     assert_equal "'hello'", RunnableAsciidoc.shell_single_quoted('hello')

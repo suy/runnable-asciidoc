@@ -26,6 +26,10 @@ require 'asciidoctor'
 require 'asciidoctor/converter'
 
 # String helpers used to emit shell code. Pure functions.
+require 'asciidoctor'
+require 'asciidoctor/converter'
+
+# String helpers shared by all backends. Pure functions.
 module RunnableAsciidoc
   module_function
 
@@ -84,57 +88,71 @@ module RunnableAsciidoc
   module_function :color_reset
 end
 
-class RunnableConverter
-  include Asciidoctor::Converter
-  register_for 'runnable'
-
+# The neutral document model shared by every backend.
+#
+# A Backend walks the Asciidoctor tree once (DocumentBuilder) and produces a
+# plain hash of values; each renderer turns that hash into its output. The
+# model carries no presentation: no wrapping, no blank lines, no quoting.
+#
+#   {
+#     title:  'Document title',
+#     blocks: [
+#       { title: ..., hint: ..., source: [...] },  # runnable; lines array
+#       ...
+#     ],
+#     steps: [
+#       { context: [item, ...], block: block-hash or nil },
+#       ...
+#     ]
+#   }
+#
+# A step is the slice of the document shown before one runnable block: its
+# context items, and the block itself. The tail step (after the last block)
+# has no block and is always shown at the end.
+#
+# Context items are values, tagged by kind:
+#   { kind: :heading, text: }   section titles, rendered unconditionally
+#   { kind: :title,   text: }   the title of a code block (orientation)
+#   { kind: :prose,   text: }   wrapped prose (hidden by --no-prose)
+#   { kind: :code,    text:, note: }  illustrative code, shown indented
+module RunnableAsciidoc
   # Languages whose source blocks become runnable functions.
   RUNNABLE_LANGUAGES = %w[sh bash zsh shell].freeze
+
   # Terminal width used when wrapping prose.
   PROSE_WIDTH = 78
-  # Width of the horizontal rule framing a block offer.
-  RULE_WIDTH = 60
+end
 
-  def initialize(backend, opts = {})
-    super
-    outfilesuffix '.sh'
-    # The document is cut into chunks at every runnable block: the terminal
-    # text accumulated so far becomes the context shown before that block.
-    @context_lines = []     # terminal text of the chunk being built
-    @chunks = []            # { context: Array, block: function-name or nil }
-    @block_definitions = [] # script source of each runnable block function
-    @blocks = []            # { function:, first_line: }
+# The tree walk shared by all backends: converts an Asciidoctor document into
+# the neutral model described above. One instance converts one document; the
+# converter methods append context items, and a runnable block closes the
+# pending items into a step.
+class DocumentBuilder
+  def initialize
+    @title = nil
+    @blocks = []  # runnable blocks: { title:, hint:, source: (lines array) }
+    @steps = []   # { context:, block: }
+    @context = [] # context items of the step being built
   end
 
-  # Dispatch by transform name (the node name): convert_paragraph,
-  # convert_inline_quoted, and so on. Transforms without a handler render as
-  # nothing — a script cannot usefully show audio, video, or a table of
-  # contents.
-  def convert(node, transform = node.node_name, _opts = nil)
-    handler = :"convert_#{transform}"
-    return send(handler, node) if respond_to? handler, true
-    ''
+  attr_reader :title, :blocks, :steps
+
+  def build(node)
+    @title = (node.doctitle || node.attr('docname') || 'Untitled document').to_s
+    walk node.blocks
+    close_step nil
+    {
+      title: @title,
+      blocks: @blocks,
+      steps: @steps
+    }
   end
 
   # ---- block transforms ------------------------------------------------------
   #
-  # Transforms append to the streams and return nil; the document transform
-  # assembles the script. Compound nodes are walked explicitly rather than
-  # through node.content, so children are converted exactly once, in order.
-
-  def convert_document(node)
-    @context_lines.clear
-    @chunks.clear
-    @block_definitions.clear
-    @blocks.clear
-    walk node.blocks
-    close_chunk
-    assemble node
-  end
-
-  # Programmatic use (Asciidoctor.load followed by Document#convert) defaults
-  # to the "embedded" transform; the script is the same either way.
-  alias convert_embedded convert_document
+  # Transforms append to the context and return nil; build() assembles the
+  # model. Compound nodes are walked explicitly rather than through
+  # node.content, so children are converted exactly once, in order.
 
   def convert_preamble(node)
     walk node.blocks
@@ -142,13 +160,13 @@ class RunnableConverter
   end
 
   def convert_section(node)
-    emit_heading "#{'=' * (node.level + 1)} #{node.title}"
+    emit_heading node.level, node.title
     walk node.blocks
     nil
   end
 
   def convert_floating_title(node)
-    emit_heading "#{'=' * (node.level + 1)} #{node.title}"
+    emit_heading node.level, node.title
     nil
   end
 
@@ -224,11 +242,10 @@ class RunnableConverter
 
   def convert_listing(node)
     language = node.attr 'language'
-    emit_title node.title if node.title
 
     if language.nil? || language.empty?
       # Unlabeled listing: illustration only, never run.
-      emit_code node.source
+      emit_code node.source, note: nil
       return nil
     end
 
@@ -249,12 +266,12 @@ class RunnableConverter
   end
 
   def convert_literal(node)
-    emit_code node.source
+    emit_code node.source, note: nil
     nil
   end
 
   def convert_pass(node)
-    emit_code node.content
+    emit_code node.content, note: nil
     nil
   end
 
@@ -272,16 +289,6 @@ class RunnableConverter
 
   def convert_stem(_node)
     emit_prose '[formula omitted — see the document]'
-    nil
-  end
-
-  def convert_thematic_break(_node)
-    emit_blank
-    nil
-  end
-
-  def convert_page_break(_node)
-    emit_blank
     nil
   end
 
@@ -335,88 +342,241 @@ class RunnableConverter
 
   private
 
-  # ---- tree walking ----------------------------------------------------------
-
   def walk(blocks)
     blocks.each { |block| convert block }
   end
 
-  # ---- chunks ------------------------------------------------------------------
-  #
-  # A chunk is the slice of the document shown before one runnable block:
-  # its prose, and the block itself. The tail chunk (after the last block)
-  # has no block and is always shown at the end.
-
-  def close_chunk
-    @chunks << { context: @context_lines, block: nil }
-    @context_lines = []
+  # Asciidoctor dispatches on the node name (convert_paragraph and so on).
+  # Transforms without a handler render as nothing — a terminal cannot
+  # usefully show audio, video, or a table of contents.
+  def convert(node, transform = node.node_name)
+    handler = :"convert_#{transform}"
+    return send(handler, node) if respond_to? handler, true
+    ''
   end
 
-  # ---- stream emitters -------------------------------------------------------
-
-  def emit_prose(text)
-    RunnableAsciidoc.wrap_text(text, PROSE_WIDTH).each do |line|
-      emit_line print_prose_call(line)
-    end
-    emit_blank_prose
-    nil
-  end
+  # ---- context items -----------------------------------------------------------
 
   # A heading is not prose: it orients the reader even with --no-prose, so
-  # it prints unconditionally. The blank line that separated a heading from
-  # what follows belonged to the heading; separation is now supplied by the
-  # follower itself (a paragraph's trailing blank, code's leading blank),
-  # which keeps single spacing in both modes.
-  def emit_heading(text)
-    emit_blank
-    emit_line print_call(text)
+  # it prints unconditionally. The level is the AsciiDoc level (document
+  # title is 0); renderers decide how to present it.
+  def emit_heading(level, text)
+    @context << { kind: :heading, level: level, text: text }
     nil
   end
 
   # The title of a code block. Like headings, it is not prose: it labels the
   # code, and labels must survive --no-prose or the reader gets lost.
   def emit_title(title)
-    emit_blank
-    emit_line print_call(title)
+    @context << { kind: :title, text: title }
+    nil
+  end
+
+  def emit_prose(text)
+    @context << { kind: :prose, text: text }
     nil
   end
 
   def emit_indented(text, prefix: '')
-    RunnableAsciidoc.wrap_text(text, PROSE_WIDTH - prefix.length).each do |line|
-      emit_line print_prose_call(prefix + line)
-    end
-    emit_blank_prose
+    @context << { kind: :prose, text: text, prefix: prefix }
     nil
   end
 
   # Illustrative code, printed as part of the context, optionally annotated.
   # Code is content, not prose: it prints in every mode.
-  def emit_code(source, note: nil)
-    emit_blank
-    emit_line print_call(note) if note
-    source.each_line do |line|
-      emit_line print_call("    #{line.chomp}")
-    end
-    emit_blank
+  def emit_code(source, note:)
+    @context << { kind: :code, text: source, note: note }
     nil
   end
 
-  # Appends one output line, collapsing runs of blank lines into one.
-  # A blank is a printed empty line (either kind of print call) or, for the
-  # very start of a chunk, a pending empty string.
-  def emit_line(line)
-    @context_lines << line unless blank_call?(line) && blank_call?(@context_lines.last.to_s)
+  # ---- runnable blocks -------------------------------------------------------
+
+  def runnable_language?(language)
+    RunnableAsciidoc::RUNNABLE_LANGUAGES.include? language.downcase
+  end
+
+  # Records the block and closes the pending context into a step for it.
+  def register_runnable_block(node)
+    lines = node.source.each_line.map(&:chomp)
+    # The hint shown by --list prefers the title: it is the author's
+    # description of the block. The banner before a block shows the title
+    # alone, so the fallback first line matters only for untitled blocks
+    # in --list.
+    hint = node.title || lines.first.to_s
+    block = { title: node.title, hint: hint, source: lines }
+
+    # The banner shows the title of a titled block; the same line in the
+    # context would print it twice in a row.
+    @context.pop if node.title && title_item?(@context.last, node.title)
+    close_step block
+    @blocks << block
     nil
+  end
+
+  def title_item?(item, title)
+    item.is_a?(Hash) && item[:kind] == :title && item[:text] == title
+  end
+
+  def close_step(block)
+    @steps << { context: @context, block: block }
+    @context = []
+  end
+end
+
+# Asciidoctor backend "runnable": turns a document into an interactive shell
+# script. The walk produces the neutral model (DocumentBuilder); this class
+# is only presentation: wrapping, blank-line collapsing, quoting, and the
+# driver.
+class RunnableConverter
+  include Asciidoctor::Converter
+  register_for 'runnable'
+
+  # Width of the horizontal rule framing a block offer.
+  RULE_WIDTH = 60
+
+  def initialize(backend, opts = {})
+    super
+    outfilesuffix '.sh'
+  end
+
+  # Dispatch by transform name. The document itself assembles the script;
+  # inline transforms are handled here because node.content applies inline
+  # substitutions through the document's converter (this instance). The
+  # block-level transforms live in DocumentBuilder, shared with the JSON
+  # backend.
+  def convert(node, transform = node.node_name, _opts = nil)
+    return build_script(node) if %w[document embedded].include? transform
+    handler = :"convert_#{transform}"
+    return send(handler, node) if respond_to? handler, true
+    ''
+  end
+
+  # ---- inline transforms -----------------------------------------------------
+  #
+  # node.content applies inline substitutions through the document's
+  # converter, so these handlers must exist here as well as in
+  # DocumentBuilder (which holds the authoritative copies for the model).
+
+  def convert_inline_quoted(node)
+    node.text
+  end
+
+  def convert_inline_anchor(node)
+    case node.type
+    when :link
+      text = node.text
+      url = node.target
+      text.empty? || text == url ? url : %(#{text} (#{url}))
+    when :xref
+      node.text.to_s.empty? ? node.target.to_s : node.text
+    else
+      node.text.to_s
+    end
+  end
+
+  def convert_inline_footnote(node)
+    node.type == :ref ? '' : %( [note: #{node.text}])
+  end
+
+  def convert_inline_break(node)
+    %(#{node.text}\n)
+  end
+
+  def convert_inline_callout(node)
+    %(<#{node.text}>)
+  end
+
+  def convert_inline_kbd(node)
+    node.attr 'keys'
+  end
+
+  def convert_inline_menu(node)
+    [node.attr('menu'), *node.attr('menuitems').to_s.split].compact.join(' > ')
+  end
+
+  def convert_inline_image(node)
+    alt = node.attr 'alt'
+    alt.to_s.empty? ? '[image]' : "[image: #{alt}]"
+  end
+
+  def convert_inline_indexterm(_node)
+    ''
+  end
+
+  private
+
+  # ---- walk, then assemble ---------------------------------------------------
+
+  def build_script(node)
+    model = DocumentBuilder.new.build node
+    assemble model, node.attr('docfile')
+  end
+
+  # ---- assembly ---------------------------------------------------------------
+
+  def assemble(model, docfile = nil)
+    @index = 0
+    script = +''
+    script << preamble(model[:title], docfile)
+    script << color_constants
+    model[:steps].each_with_index do |step, index|
+      # Numbering is a contract with the driver (context N introduces block
+      # N), so every step gets a function. An empty body would not parse;
+      # the no-op command ':' stands in for it.
+      script << "runnable_context_#{format('%02d', index + 1)}() {\n"
+      context_lines(step[:context]).each do |line|
+        script << "  #{line}\n"
+      end
+      script << "  :\n" if step[:context].empty?
+      script << "}\n\n"
+    end
+    model[:blocks].each do |block|
+      script << block_definition(block) << "\n"
+    end
+    script << block_metadata_functions(model[:blocks])
+    script << driver(model[:blocks], model[:title])
+    script
+  end
+
+  # Renders one step's context items into print-call lines. The blank-line
+  # scheme is presentation: separation is supplied by the items themselves
+  # (a heading and a code block carry blanks, prose carries a trailing one,
+  # a title carries a leading one), and runs of blank lines collapse into
+  # one, as in the terminal text this output imitates.
+  def context_lines(items)
+    lines = [] # print-call lines of the step
+    emit = ->(line) do
+      lines << line unless blank_call?(line) && blank_call?(lines.last.to_s)
+    end
+
+    items.each do |item|
+      case item[:kind]
+      when :heading
+        emit.call print_call('')
+        emit.call print_call("#{'=' * (item[:level] + 1)} #{item[:text]}")
+      when :title
+        emit.call print_call('')
+        emit.call print_call(item[:text])
+      when :prose
+        prefix = item[:prefix] || ''
+        RunnableAsciidoc.wrap_text(item[:text], RunnableAsciidoc::PROSE_WIDTH - prefix.length).each do |line|
+          emit.call print_prose_call(prefix + line)
+        end
+        emit.call print_prose_call('')
+      when :code
+        emit.call print_call('')
+        emit.call print_call(item[:note]) if item[:note]
+        item[:text].each_line do |line|
+          emit.call print_call("    #{line.chomp}")
+        end
+        emit.call print_call('')
+      end
+    end
+    lines
   end
 
   def blank_call?(line)
     line.empty? || line == print_call('') || line == print_prose_call('')
-  end
-
-  # A structural blank: separation around headings, titles, and code. It is
-  # content-independent, so it prints in every mode.
-  def emit_blank
-    emit_line print_call('')
   end
 
   def print_call(text)
@@ -430,77 +590,13 @@ class RunnableConverter
     %(runnable_print_prose #{RunnableAsciidoc.shell_single_quoted(text)})
   end
 
-  def emit_blank_prose
-    emit_line print_prose_call('')
-  end
-
-  # ---- runnable blocks -------------------------------------------------------
-
-  def runnable_language?(language)
-    RUNNABLE_LANGUAGES.include? language.downcase
-  end
-
-  # Records the block, closes the pending context into a chunk for it, and
-  # emits its function definition. The body is emitted at column zero and
-  # verbatim, so anything the block contains (heredocs included) runs exactly
-  # as written in the document.
-  def register_runnable_block(node)
-    index = @blocks.size + 1
-    function = RunnableAsciidoc.block_function_name index
-    first_line = node.source.each_line.first.to_s.chomp
-    # The hint shown by --list prefers the title: it is the author's
-    # description of the block. The banner before a block shows the title
-    # alone (runnable_block_title), so the fallback first line matters
-    # only for untitled blocks in --list.
-    hint = node.title || first_line
-    @blocks << { function: function, first_line: first_line, hint: hint,
-                 title: node.title, source: node.source }
-
-    # The banner shows the title of a titled block; the same line in the
-    # context would print it twice in a row.
-    @context_lines.pop if node.title && @context_lines.last == print_call(node.title)
-    @chunks << { context: @context_lines, block: function }
-    @context_lines = []
-
-    definition = +"#{function}() {\n"
-    node.source.each_line do |line|
-      definition << line
-      definition << "\n" unless line.end_with?("\n")
+  def block_definition(block)
+    definition = +"#{RunnableAsciidoc.block_function_name(@index += 1)}() {\n"
+    block[:source].each do |line|
+      definition << line << "\n"
     end
     definition << "}\n"
-    @block_definitions << definition
-    nil
-  end
-
-  # ---- assembly ---------------------------------------------------------------
-
-  def assemble(node)
-    title = (node.doctitle || node.attr('docname') || 'Untitled document').to_s
-    docfile = node.attr 'docfile'
-
-    script = +''
-    script << preamble(title, docfile)
-    script << color_constants
-    @chunks.each_with_index do |chunk, index|
-      # Numbering is a contract with the driver (context N introduces block
-      # N), so every chunk gets a function. An empty body would not parse;
-      # the no-op command ':' stands in for it.
-      script << "runnable_context_#{format('%02d', index + 1)}() {\n"
-      if chunk[:context].empty?
-        script << "  :\n"
-      else
-        chunk[:context].each do |line|
-          script << "  #{line}\n"
-        end
-      end
-      script << "}\n\n"
-    end
-    @block_definitions.each do |definition|
-      script << definition << "\n"
-    end
-    script << block_metadata_functions
-    script << driver(title)
-    script
+    definition
   end
 
   # Generation-time ANSI constants, one per color the runtime functions use.
@@ -524,7 +620,7 @@ class RunnableConverter
     sequence[/\e\[(\d+)m/, 1]
   end
 
-  def preamble(title, docfile)
+  def preamble(title, docfile = nil)
     <<~SH
       #!/usr/bin/env bash
       #
@@ -636,12 +732,8 @@ class RunnableConverter
       }
     SH
   end
-
-  # Functions that carry per-block metadata into the generated script: the
-  # --list view (one line per block) and the verbatim source echoed before
-  # a block runs.
-  def block_metadata_functions
-    return '' if @blocks.empty?
+  def block_metadata_functions(blocks)
+    return '' if blocks.empty?
     lines = +<<~'SH'
       runnable_show_list() {
         printf '%s\n' "$(runnable_paint runnable_color_bold 'Runnable blocks:')"
@@ -656,9 +748,9 @@ class RunnableConverter
       runnable_block_hint() { # $1: function name; prints its first line
         case $1 in
     SH
-    @blocks.each do |block|
+    blocks.each_with_index do |block, index|
       hint = RunnableAsciidoc.shell_single_quoted(block[:hint])
-      lines << "          #{block[:function]}) printf '%s\\n' #{hint} ;;\n"
+      lines << "          #{RunnableAsciidoc.block_function_name(index + 1)}) printf '%s\\n' #{hint} ;;\n"
     end
     lines << "        esac\n"
     lines << "      }\n\n"
@@ -667,10 +759,10 @@ class RunnableConverter
       runnable_block_title() { # $1: function name; prints its title, if any
         case $1 in
     SH
-    @blocks.each do |block|
+    blocks.each_with_index do |block, index|
       next unless block[:title]
       title = RunnableAsciidoc.shell_single_quoted(block[:title])
-      lines << "          #{block[:function]}) printf '%s\\n' #{title} ;;\n"
+      lines << "          #{RunnableAsciidoc.block_function_name(index + 1)}) printf '%s\\n' #{title} ;;\n"
     end
     lines << "        esac\n"
     lines << "      }\n\n"
@@ -679,19 +771,18 @@ class RunnableConverter
       runnable_block_source() { # $1: function name; prints its code
         case $1 in
     SH
-    @blocks.each do |block|
-      lines << "          #{block[:function]})\n"
-      block[:source].each_line do |line|
-        lines << "            runnable_print_code #{RunnableAsciidoc.shell_single_quoted(line.chomp)}\n"
+    blocks.each_with_index do |block, index|
+      lines << "          #{RunnableAsciidoc.block_function_name(index + 1)})\n"
+      block[:source].each do |line|
+        lines << "            runnable_print_code #{RunnableAsciidoc.shell_single_quoted(line)}\n"
       end
       lines << "            ;;\n"
     end
     lines << "        esac\n"
     lines << "      }\n\n"
-    lines.sub!("RUNNABLE_LIST_TOTAL", (@blocks.size).to_s)
+    lines.sub!("RUNNABLE_LIST_TOTAL", (blocks.size).to_s)
     lines
   end
-
   def run_block_function
     <<~SH
       run_block() { # $1: function name; returns 0 finished/skipped, 2 stop
@@ -720,9 +811,8 @@ class RunnableConverter
       }
     SH
   end
-
-  def driver(title)
-    total = @blocks.size
+  def driver(blocks, title)
+    total = blocks.size
     parts = +''
     parts << run_block_function
     parts << <<~SH
@@ -834,3 +924,130 @@ class RunnableConverter
     parts
   end
 end
+
+
+# Asciidoctor backend "runnable-json": turns a document into a JSON document
+# for a graphical (QML) viewer. Same walk, same model, different renderer.
+#
+# Schema (version 1):
+#
+#   {
+#     "version": 1,
+#     "title": "Document title",
+#     "steps": [
+#       {
+#         "context": [
+#           { "kind": "heading", "level": 1, "text": "First" },
+#           { "kind": "title",   "text": "Build the demo" },
+#           { "kind": "prose",   "text": "Before text.", "prefix": "" },
+#           { "kind": "code",    "text": "echo one", "note": "(not run)" }
+#         ],
+#         "block": null,     // or the runnable block introduced by the step
+#         // block object: { "title", "hint", "source": [line, ...] }
+#       }
+#     ]
+#   }
+#
+# The viewer owns all presentation: wrapping, spacing, quoting, colors. One
+# JSON field per line (pretty_generate) keeps diffs readable.
+class JsonConverter
+  include Asciidoctor::Converter
+  register_for 'runnable-json'
+
+  def initialize(backend, opts = {})
+    super
+    outfilesuffix '.json'
+  end
+
+  def convert(node, transform = node.node_name, _opts = nil)
+    return build_json(node) if %w[document embedded].include? transform
+    handler = :"convert_#{transform}"
+    return send(handler, node) if respond_to? handler, true
+    ''
+  end
+
+  # ---- inline transforms (see DocumentBuilder for the authoritative copies) --
+
+  def convert_inline_quoted(node)
+    node.text
+  end
+
+  def convert_inline_anchor(node)
+    case node.type
+    when :link
+      text = node.text
+      url = node.target
+      text.empty? || text == url ? url : %(#{text} (#{url}))
+    when :xref
+      node.text.to_s.empty? ? node.target.to_s : node.text
+    else
+      node.text.to_s
+    end
+  end
+
+  def convert_inline_footnote(node)
+    node.type == :ref ? '' : %( [note: #{node.text}])
+  end
+
+  def convert_inline_break(node)
+    %(#{node.text}\n)
+  end
+
+  def convert_inline_callout(node)
+    %(<#{node.text}>)
+  end
+
+  def convert_inline_kbd(node)
+    node.attr 'keys'
+  end
+
+  def convert_inline_menu(node)
+    [node.attr('menu'), *node.attr('menuitems').to_s.split].compact.join(' > ')
+  end
+
+  def convert_inline_image(node)
+    alt = node.attr 'alt'
+    alt.to_s.empty? ? '[image]' : "[image: #{alt}]"
+  end
+
+  def convert_inline_indexterm(_node)
+    ''
+  end
+
+  private
+
+  def build_json(node)
+    model = DocumentBuilder.new.build node
+    json = {
+      'version' => 1,
+      'title' => model[:title],
+      'steps' => model[:steps].map { |step| step_json(step) }
+    }
+    JSON.pretty_generate(json) + "\n"
+  end
+
+  def step_json(step)
+    {
+      'context' => step[:context].map { |item| context_item_json(item) },
+      'block' => step[:block] && block_json(step[:block])
+    }
+  end
+
+  def context_item_json(item)
+    json = { 'kind' => item[:kind].to_s, 'text' => item[:text] }
+    json['level'] = item[:level] if item.key? :level
+    json['note'] = item[:note] if item.key? :note
+    json['prefix'] = item[:prefix] if item.key? :prefix
+    json
+  end
+
+  def block_json(block)
+    {
+      'title' => block[:title],
+      'hint' => block[:hint],
+      'source' => block[:source]
+    }
+  end
+end
+
+require 'json'

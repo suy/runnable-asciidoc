@@ -1,7 +1,8 @@
 = Runnable AsciiDoc
 
-An https://asciidoctor.org[Asciidoctor] custom backend that converts an
-AsciiDoc document into an interactive shell script.
+An https://asciidoctor.org[Asciidoctor] custom converter with two backends:
+an interactive shell script (`-b runnable`, the default), and a JSON document
+for a graphical viewer (`-b runnable-json`).
 
 Write a document like a tutorial or a setup guide. The prose explains, and the
 `[source,bash]` blocks do. Convert the document, run the generated script, and
@@ -84,6 +85,90 @@ Headings, paragraphs, lists, admonitions, and inline markup (`*bold*`,
 formulas are replaced by a pointer back to the document. A script is not the
 place for them.
 
+== The JSON backend
+
+`-b runnable-json` converts the same document into JSON for a viewer program
+(a GUI sort of slideshow is planned). The viewer owns the presentation; the JSON
+is the contract between the converter and the viewer. Schema, version 1:
+
+----
+{
+  "version": 1,
+  "title": "Document title",
+  "steps": [
+    {
+      "context": [
+        { "kind": "heading", "text": "First", "level": 1 },
+        { "kind": "title",   "text": "Build the demo" },
+        { "kind": "prose",   "text": "Before text." },
+        { "kind": "code",    "text": "echo one", "note": "(not run)" }
+      ],
+      "block": {
+        "title": "Build the demo",
+        "hint": "Build the demo",
+        "source": ["echo one"]
+      }
+    }
+  ]
+}
+----
+
+* The document is cut into *steps* the same way the script cuts it into
+  chunks: the context is everything shown before the block. The last step has
+  `"block": null` and holds the closing prose.
+* `context` is an ordered array; the viewer shows the items in order. Every
+  item has a `kind` and its fields — the generated JSON is pretty-printed
+  with one field per line, so each item spans several lines:
+
+[source,json]
+----
+"context": [
+  {
+    "kind": "heading",
+    "text": "First",
+    "level": 1
+  },
+  {
+    "kind": "prose",
+    "text": "Before text."
+  },
+  {
+    "kind": "title",
+    "text": "Build the demo"
+  },
+  {
+    "kind": "code",
+    "text": "echo one",
+    "note": "(not run)"
+  }
+]
+----
+
+[cols="1,3"]
+|===
+|`kind` |Fields
+
+|`heading`
+|`text` (the section title, without the `=` markers), `level` (the AsciiDoc
+ level; the document title is 0)
+
+|`title`
+|`text` (the title of the code block that follows)
+
+|`prose`
+|`text`; optionally `prefix` (a string to print before the line when the
+ text is wrapped — definition lists indent their descriptions)
+
+|`code`
+|`text` (the source), `note` (why it does not run; absent when there is
+ nothing to note)
+|===
+
+* `block` is the runnable block: `title` (null when untitled), `hint` (the
+  title, or the first code line for untitled blocks), and `source`, an array
+  with one string per code line (newlines are the array's structure, not
+  characters in a string, so no JSON line ever grows with the code).
+
 == Design notes
 
 * The generated script runs each block as a normal shell function. A block
@@ -106,13 +191,23 @@ place for them.
 
 [source,console]
 ----
-$ ruby test/auto/run.rb
+$ make test
+$ make example
 ----
 
-The tests convert documents, syntax-check the generated scripts with
-`bash -n`, and drive them through runs, failures, skips, and resumes. They
-need the `GEM_HOME` that has asciidoctor; minitest ships with Ruby, so there
-is nothing else to install.
+The tests convert documents through both backends, syntax-check the generated
+scripts with `bash -n`, and drive them through runs, failures, skips, and
+resumes. They need the `GEM_HOME` that has asciidoctor; minitest ships with
+Ruby, so there is nothing else to install.
+
+Both backends are selected through the wrapper, which passes the backend to
+asciidoctor:
+
+[source,console]
+----
+$ bin/runnable-asciidoc -o setup.sh doc.adoc
+$ bin/runnable-asciidoc -b runnable-json -o setup.json doc.adoc
+----
 
 == Status
 
