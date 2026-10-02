@@ -199,6 +199,8 @@ class RunnableConverter
 
   def convert_listing(node)
     language = node.attr 'language'
+    emit_title node.title if node.title
+
     if language.nil? || language.empty?
       # Unlabeled listing: illustration only, never run.
       emit_code node.source
@@ -249,12 +251,12 @@ class RunnableConverter
   end
 
   def convert_thematic_break(_node)
-    @context_lines << '' << ''
+    emit_blank
     nil
   end
 
   def convert_page_break(_node)
-    @context_lines << '' << ''
+    emit_blank
     nil
   end
 
@@ -329,29 +331,43 @@ class RunnableConverter
 
   def emit_prose(text)
     RunnableAsciidoc.wrap_text(text, PROSE_WIDTH).each do |line|
-      emit_line print_call(line)
+      emit_line print_prose_call(line)
     end
-    emit_blank
+    emit_blank_prose
     nil
   end
 
+  # A heading is not prose: it orients the reader even with --no-prose, so
+  # it prints unconditionally. The blank line that separated a heading from
+  # what follows belonged to the heading; separation is now supplied by the
+  # follower itself (a paragraph's trailing blank, code's leading blank),
+  # which keeps single spacing in both modes.
   def emit_heading(text)
     emit_blank
     emit_line print_call(text)
+    nil
+  end
+
+  # The title of a code block. Like headings, it is not prose: it labels the
+  # code, and labels must survive --no-prose or the reader gets lost.
+  def emit_title(title)
     emit_blank
+    emit_line print_call(title)
     nil
   end
 
   def emit_indented(text, prefix: '')
     RunnableAsciidoc.wrap_text(text, PROSE_WIDTH - prefix.length).each do |line|
-      emit_line print_call(prefix + line)
+      emit_line print_prose_call(prefix + line)
     end
-    emit_blank
+    emit_blank_prose
     nil
   end
 
   # Illustrative code, printed as part of the context, optionally annotated.
+  # Code is content, not prose: it prints in every mode.
   def emit_code(source, note: nil)
+    emit_blank
     emit_line print_call(note) if note
     source.each_line do |line|
       emit_line print_call("    #{line.chomp}")
@@ -361,17 +377,36 @@ class RunnableConverter
   end
 
   # Appends one output line, collapsing runs of blank lines into one.
+  # A blank is a printed empty line (either kind of print call) or, for the
+  # very start of a chunk, a pending empty string.
   def emit_line(line)
-    @context_lines << line unless line.empty? && @context_lines.last == ''
+    @context_lines << line unless blank_call?(line) && blank_call?(@context_lines.last.to_s)
     nil
   end
 
+  def blank_call?(line)
+    line.empty? || line == print_call('') || line == print_prose_call('')
+  end
+
+  # A structural blank: separation around headings, titles, and code. It is
+  # content-independent, so it prints in every mode.
   def emit_blank
-    emit_line ''
+    emit_line print_call('')
   end
 
   def print_call(text)
     %(runnable_print #{RunnableAsciidoc.shell_single_quoted(text)})
+  end
+
+  # Prose lines go through a runtime gate so that --no-prose can hide the
+  # explanation while keeping everything that orients: headings, titles, and
+  # code. A paragraph's trailing blank is gated together with it.
+  def print_prose_call(text)
+    %(runnable_print_prose #{RunnableAsciidoc.shell_single_quoted(text)})
+  end
+
+  def emit_blank_prose
+    emit_line print_prose_call('')
   end
 
   # ---- runnable blocks -------------------------------------------------------
@@ -387,7 +422,13 @@ class RunnableConverter
   def register_runnable_block(node)
     index = @blocks.size + 1
     function = RunnableAsciidoc.block_function_name index
-    @blocks << { function: function, first_line: node.source.each_line.first.to_s.chomp }
+    first_line = node.source.each_line.first.to_s.chomp
+    # The hint (shown by --list and before each block) prefers the title:
+    # it is the author's description of the block, and it survives
+    # --no-prose, unlike the prose around the block.
+    hint = node.title || first_line
+    @blocks << { function: function, first_line: first_line, hint: hint,
+                 source: node.source }
 
     @chunks << { context: @context_lines, block: function }
     @context_lines = []
@@ -419,7 +460,7 @@ class RunnableConverter
         script << "  :\n"
       else
         chunk[:context].each do |line|
-          script << (line.empty? ? "\n" : "  #{line}\n")
+          script << "  #{line}\n"
         end
       end
       script << "}\n\n"
@@ -427,7 +468,7 @@ class RunnableConverter
     @block_definitions.each do |definition|
       script << definition << "\n"
     end
-    script << list_function
+    script << block_metadata_functions
     script << driver(title)
     script
   end
@@ -444,6 +485,15 @@ class RunnableConverter
 
       runnable_print() {
         printf '%s\\n' "$1"
+      }
+
+      runnable_print_prose() { # $1: line; hidden by --no-prose
+        [ "$RUNNABLE_SHOW_PROSE" -eq 0 ] && return 0
+        printf '%s\\n' "$1"
+      }
+
+      runnable_print_code() { # $1: line of code being echoed
+        printf '    %s\\n' "$1"
       }
 
       runnable_ask() { # $1: prompt; returns 0 enter, 13 skip, 14 re-run, 17 quit
@@ -489,7 +539,10 @@ class RunnableConverter
     SH
   end
 
-  def list_function
+  # Functions that carry per-block metadata into the generated script: the
+  # --list view (one line per block) and the verbatim source echoed before
+  # a block runs.
+  def block_metadata_functions
     return '' if @blocks.empty?
     lines = +<<~'SH'
       runnable_show_list() {
@@ -504,8 +557,22 @@ class RunnableConverter
         case $1 in
     SH
     @blocks.each do |block|
-      hint = RunnableAsciidoc.shell_single_quoted(block[:first_line])
+      hint = RunnableAsciidoc.shell_single_quoted(block[:hint])
       lines << "          #{block[:function]}) printf '%s\\n' #{hint} ;;\n"
+    end
+    lines << "        esac\n"
+    lines << "      }\n\n"
+
+    lines << <<~'SH'
+      runnable_block_source() { # $1: function name; prints its code
+        case $1 in
+    SH
+    @blocks.each do |block|
+      lines << "          #{block[:function]})\n"
+      block[:source].each_line do |line|
+        lines << "            runnable_print_code #{RunnableAsciidoc.shell_single_quoted(line.chomp)}\n"
+      end
+      lines << "            ;;\n"
     end
     lines << "        esac\n"
     lines << "      }\n\n"
@@ -548,24 +615,28 @@ class RunnableConverter
     parts << <<~SH
 
       usage() {
-        printf '%s\\n' "usage: $0 [--list | --yes | --reset | --help]"
+        printf '%s\\n' "usage: $0 [--list | --yes | --no-prose | --reset | --help]"
       }
 
       main() {
         RUNNABLE_ASSUME_YES=0
+        RUNNABLE_SHOW_PROSE=1
         RUNNABLE_SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-        case ${1:-} in
-          --list) runnable_show_list; return 0 ;;
-          --yes) RUNNABLE_ASSUME_YES=1 ;;
-          --reset)
-            rm -f "$(runnable_progress_file)"
-            printf '%s\\n' 'Progress cleared.'
-            return 0
-            ;;
-          -h|--help) usage; return 0 ;;
-          '') ;;
-          *) usage; return 2 ;;
-        esac
+        while [ "$#" -gt 0 ]; do
+          case $1 in
+            --list) runnable_show_list; return 0 ;;
+            --yes) RUNNABLE_ASSUME_YES=1 ;;
+            --no-prose) RUNNABLE_SHOW_PROSE=0 ;;
+            --reset)
+              rm -f "$(runnable_progress_file)"
+              printf '%s\\n' 'Progress cleared.'
+              return 0
+              ;;
+            -h|--help) usage; return 0 ;;
+            *) usage; return 2 ;;
+          esac
+          shift
+        done
 
         RUNNABLE_TOTAL=#{total}
         RUNNABLE_FINISHED=0
@@ -585,6 +656,7 @@ class RunnableConverter
           local index
           local name
           local state
+          local failures
           for ((index = 1; index <= RUNNABLE_TOTAL; index++)); do
             name=$(printf 'block_%02d' "$index")
             state=$(runnable_state "$name")
@@ -592,6 +664,8 @@ class RunnableConverter
               continue
             fi
             runnable_context_$(printf '%02d' "$index")
+            printf '%s\\n' "+ block $index/$RUNNABLE_TOTAL: $(runnable_block_hint "$name")"
+            runnable_block_source "$name"
             if [ "$RUNNABLE_ASSUME_YES" -eq 0 ]; then
               runnable_ask '  [Enter] run · [s] skip · [q] quit > '
               case $? in
@@ -605,7 +679,6 @@ class RunnableConverter
                   ;;
               esac
             fi
-            printf '%s\\n' "--- block $index/$RUNNABLE_TOTAL: $(runnable_block_hint "$name")"
             run_block "$name"
             case $? in
               2)
@@ -614,10 +687,10 @@ class RunnableConverter
                 ;;
             esac
             runnable_show_progress
+            printf '\\n'
           done
 
           runnable_context_#{format('%02d', total + 1)}
-          local failures
           failures=$(awk '$2 == "failed" { count++ } END { print count + 0 }' "$(runnable_progress_file)")
           if [ "$failures" -gt 0 ]; then
             printf '%s\\n' "$failures block(s) failed; they will be offered again next run."

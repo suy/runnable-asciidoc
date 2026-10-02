@@ -60,6 +60,19 @@ class ShellQuotingTest < Minitest::Test
     assert_equal text, out.chomp
   end
 
+  def test_print_call_lines_are_printed
+    # Every context line must appear inside a runnable_print* call; a bare
+    # newline inside a function body prints nothing, which once silently
+    # swallowed all paragraph breaks.
+    text = 'a line'
+    script = <<~SH
+      runnable_print() { printf '%s\\n' "$1"; }
+      runnable_print #{RunnableAsciidoc.shell_single_quoted(text)}
+    SH
+    out = IO.popen(['bash', '-c', script], &:read)
+    assert_equal "a line\n", out
+  end
+
   def test_block_function_name_padding
     assert_equal 'block_01', RunnableAsciidoc.block_function_name(1)
     assert_equal 'block_12', RunnableAsciidoc.block_function_name(12)
@@ -149,6 +162,86 @@ class ConversionTest < Minitest::Test
   def test_prose_markup_expanded
     content = File.read(@script)
     assert_includes content, 'Intro prose with bold, code, and a site (https://example.org).'
+  end
+
+  def test_paragraph_breaks_print_blank_lines
+    out, _status = run_script @script, args: ['--yes']
+    assert_includes out, "Intro prose with bold, code, and a site (https://example.org).\n\n"
+  end
+
+  def test_no_prose_hides_prose_but_keeps_headings_and_code
+    out, status = run_script @script, args: ['--yes', '--no-prose']
+    assert status.success?
+    refute_includes out, 'Before text.'
+    refute_includes out, 'Closing prose.'
+    assert_includes out, '=== Sample ==='
+    assert_includes out, '== First'
+    assert_includes out, '== Second'
+    assert_includes out, 'echo one'
+    assert_includes out, 'echo two'
+    assert_includes out, '(python, not run)'
+  end
+
+  def test_no_prose_flag_combines_and_rejects_unknown_flags
+    _out, status = run_script @script, args: ['--no-prose', '--yes']
+    assert status.success?
+    _out, status = run_script @script, args: ['--bogus']
+    refute status.success?
+  end
+
+  def test_code_block_title_is_printed
+    doc = <<~ADOC
+      = Titled
+
+      [source,bash]
+      .Build the demo
+      ----
+      echo one
+      ----
+    ADOC
+    script = convert doc
+    content = File.read(script)
+    assert_includes content, "runnable_print 'Build the demo'"
+    out, _status = run_script script, args: ['--yes', '--no-prose']
+    assert_includes out, 'Build the demo'
+  end
+
+  def test_titled_block_hint_prefers_title
+    doc = <<~ADOC
+      = Titled
+
+      [source,bash]
+      .Build the demo
+      ----
+      echo one
+      ----
+    ADOC
+    script = convert doc
+    out, _status = run_script script, args: ['--list']
+    assert_includes out, 'block_01: Build the demo'
+  end
+
+  def test_block_source_is_echoed_before_running
+    out, _status = run_script @script, args: ['--yes']
+    # The whole code, indented, shows before the block output.
+    assert_match(/\+ block 1\/2.*\n    echo one\none\n/, out)
+  end
+
+  def test_multiline_block_source_is_echoed_verbatim
+    doc = <<~ADOC
+      = Multi
+
+      [source,bash]
+      ----
+      printf '%s\\n' 'it''s $tricky'
+      echo done
+      ----
+    ADOC
+    script = convert doc
+    content = File.read(script)
+    assert_includes content, "runnable_print_code 'echo done'"
+    out, _status = run_script script, args: ['--yes']
+    assert_includes out, "    echo done\n"
   end
 
   def test_full_run_and_resume

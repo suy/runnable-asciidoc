@@ -35,6 +35,11 @@ The generated script understands a few flags:
 |--yes
 |Run all pending blocks without stopping; abort at the first failure.
 
+|`--no-prose`
+|Hide the prose (paragraphs, lists, notes). Headings, code block titles,
+ and code are still shown, so you keep your bearings. Combinable with
+ `--yes`.
+
 |--reset
 |Discard saved progress.
 
@@ -45,6 +50,9 @@ The generated script understands a few flags:
 == How blocks are treated
 
 * `[source,bash]` (also `sh`, `shell`, `zsh`) becomes a runnable function.
+* A titled block (`.Title` above the block) has its title printed before it
+  runs, always — even with `--no-prose`. The title also stands in for the
+  first code line in `--list` and in the `+ block N/M:` banner.
 * `opts=norun` in the block attributes keeps a block from running; it is
   printed as context, marked "(not run)".
 * Any other language (`python`, `ruby`, ...) is printed as context, marked
@@ -52,6 +60,9 @@ The generated script understands a few flags:
   shared state, which does not fit the model.
 * Blocks share one shell. A `cd` or a variable from an earlier block is still
   in effect later, like pasting the whole document into a terminal.
+
+Before a block runs, the script echoes its full code, indented, so you always
+see what you are about to execute — and what you would skip.
 
 == Writing documents
 
