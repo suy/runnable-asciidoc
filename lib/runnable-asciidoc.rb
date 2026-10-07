@@ -851,7 +851,7 @@ class RunnableConverter
     parts << <<~SH
 
       usage() {
-        printf '%s\\n' "usage: $0 [--list | --yes | --no-prose | --color | --no-color | --reset | --help]"
+        printf '%s\\n' "usage: $0 [--list | --yes | --no-prose | --color | --no-color | --reset | -N | --help]"
       }
 
       main() {
@@ -861,6 +861,7 @@ class RunnableConverter
         # and the paint functions must never see an unbound variable.
         RUNNABLE_COLOR_ENABLED=0
         RUNNABLE_COLOR_CHOICE=2
+        RUNNABLE_STOP_AT=0
         RUNNABLE_SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
         while [ "$#" -gt 0 ]; do
           case $1 in
@@ -876,6 +877,13 @@ class RunnableConverter
             --reset)
               rm -f "$(runnable_progress_file)"
               printf '%s\\n' 'Progress cleared.'
+              ;;
+            -[0-9]*)
+              RUNNABLE_STOP_AT=${1#-}
+              if ! [ "$RUNNABLE_STOP_AT" -gt 0 ] 2>/dev/null; then
+                usage
+                return 2
+              fi
               ;;
             -h|--help) usage; return 0 ;;
             *) usage; return 2 ;;
@@ -910,6 +918,10 @@ class RunnableConverter
             state=$(runnable_state "$name")
             if [ "$state" = done ] || [ "$state" = skipped ]; then
               continue
+            fi
+            if [ "$RUNNABLE_STOP_AT" -gt 0 ] && [ "$index" -eq "$RUNNABLE_STOP_AT" ]; then
+              runnable_print "$(runnable_paint runnable_color_yellow "Stopped before block $index. Run this script again to resume.")"
+              return 0
             fi
             runnable_context_$(printf '%02d' "$index")
             runnable_rule

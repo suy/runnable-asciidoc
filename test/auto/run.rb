@@ -362,6 +362,23 @@ class ConversionTest < Minitest::Test
     assert_includes out, 'one'
   end
 
+  def test_stop_at_flag_runs_prefix_and_stops
+    out, status = run_script @script, args: ['-2'], stdin: "\n"
+    assert status.success?
+    assert_includes out, 'echo one'
+    assert_includes out, 'Stopped before block 2.'
+    refute_includes out, 'echo two'
+    progress = File.read(File.join(@dir, 'doc.sh.progress'))
+    assert_match(/^block_01 done$/, progress)
+    refute_match(/^block_02/, progress)
+  end
+
+  def test_stop_at_flag_rejects_non_positive_numbers
+    out, status = run_script @script, args: ['-0'], stdin: ''
+    refute status.success?
+    assert_includes out, 'usage:'
+  end
+
   def test_quitting_midway_saves_progress
     out, _status = run_script @script, stdin: "\nq\n"
     assert_includes out, 'Stopped'

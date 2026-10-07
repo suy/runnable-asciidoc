@@ -36,6 +36,10 @@ The generated script understands a few flags:
 |--yes
 |Run all pending blocks without stopping; abort at the first failure.
 
+|`-N`
+|Stop before block N; `-15` runs the first 14 blocks. Earlier blocks are
+ recorded, so the next run resumes at N.
+
 |`--color`, `--no-color`
 |Force colors on or off. Without a flag, colors are on for a terminal and
  off for a pipe or a file.
