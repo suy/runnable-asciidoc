@@ -73,7 +73,8 @@ The generated script understands a few flags:
 Before a block runs, the script prints an ASCII art box with the `block N/M:`
 banner, and the full code of the block inside, so you always see what you are
 about to execute, and what you would skip. The continue and re-run
-prompts sit between the same kind of rules.
+prompts sit in boxes of the same kind; every line of a box starts
+with ┃.
 
 == Writing documents
 

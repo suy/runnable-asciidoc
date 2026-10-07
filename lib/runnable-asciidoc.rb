@@ -834,9 +834,12 @@ class RunnableConverter
             [ "$status" -eq 0 ] && return 0 || return 2
           fi
           runnable_rule
-          runnable_print "  in $(runnable_working_directory)"
-          runnable_ask '  '"$(runnable_paint runnable_color_bold '[r] re-run · [Enter] continue · [q] quit > ')"
-          case $? in
+          runnable_print "┃ in $(runnable_working_directory)"
+          local prompt_status
+          runnable_ask '┃ '"$(runnable_paint runnable_color_bold '[Enter] continue · [r] re-run · [q] quit > ')"
+          prompt_status=$?
+          runnable_rule
+          case $prompt_status in
             14) continue ;;
             17) return 2 ;;
           esac
@@ -905,6 +908,7 @@ class RunnableConverter
           local name
           local state
           local failures
+          local prompt_status
           for ((index = 1; index <= RUNNABLE_TOTAL; index++)); do
             name=$(printf 'block_%02d' "$index")
             state=$(runnable_state "$name")
@@ -916,13 +920,15 @@ class RunnableConverter
             local block_title
             block_title=$(runnable_block_title "$name")
             printf '%s\\n' "$(runnable_paint runnable_color_bold "┃ block $index/$RUNNABLE_TOTAL:") $block_title"
-            runnable_print "  in $(runnable_working_directory)"
+            runnable_print "┃ in $(runnable_working_directory)"
             runnable_rule
             runnable_block_source "$name"
             runnable_rule
             if [ "$RUNNABLE_ASSUME_YES" -eq 0 ]; then
-              runnable_ask '  '"$(runnable_paint runnable_color_bold '[Enter] run · [s] skip · [q] quit > ')"
-              case $? in
+              runnable_ask '┃ '"$(runnable_paint runnable_color_bold '[Enter] run · [s] skip · [q] quit > ')"
+              prompt_status=$?
+              runnable_rule
+              case $prompt_status in
                 13)
                   runnable_record "$name" skipped
                   continue
