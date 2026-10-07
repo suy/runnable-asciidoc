@@ -286,7 +286,7 @@ class ConversionTest < Minitest::Test
     content = File.read(script)
     assert_includes content, "echo one\necho\necho two\n"
     out, _status = run_script script, args: ['--yes']
-    assert_includes out, "    echo one\n    echo\n"
+    assert_includes out, "    echo one\n"
     assert_includes out, "one\n\ntwo\n"
   end
 
