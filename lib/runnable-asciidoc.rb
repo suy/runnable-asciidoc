@@ -717,10 +717,6 @@ class RunnableConverter
         fi
       }
 
-      runnable_show_progress() {
-        printf '  %d/%d finished\\n' "$RUNNABLE_FINISHED" "$RUNNABLE_TOTAL"
-      }
-
       # ---- color -------------------------------------------------------------
 
       # True when colors should be enabled: stdout is a terminal, TERM is
@@ -946,7 +942,6 @@ class RunnableConverter
                 return 0
                 ;;
             esac
-            runnable_show_progress
             printf '\\n'
           done
 
