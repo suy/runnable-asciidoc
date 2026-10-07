@@ -66,6 +66,9 @@ The generated script understands a few flags:
   shared state, which does not fit the model.
 * Blocks share one shell. A `cd` or a variable from an earlier block is still
   in effect later, like pasting the whole document into a terminal.
+* A blank line in a runnable block becomes `echo`, so it separates commands
+  in the block's output too. Blank lines inside a heredoc are data and are
+  kept as they are.
 
 Before a block runs, the script prints an ASCII art box with the `block N/M:`
 banner, and the full code of the block inside, so you always see what you are

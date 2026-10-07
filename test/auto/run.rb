@@ -243,33 +243,74 @@ class ConversionTest < Minitest::Test
     assert_includes out, "    echo done\n"
   end
 
-def test_header_shows_working_directory_below_banner
-  out, _status = run_script @script, args: ['--yes']
-  banner_position = out.index('┃ block 1/')
-  directory_position = out.index("  in #{Dir.pwd}\n")
-  refute_nil banner_position
-  refute_nil directory_position
-  assert_operator banner_position, :<, directory_position
-end
+  def test_header_shows_working_directory_below_banner
+    out, _status = run_script @script, args: ['--yes']
+    banner_position = out.index('┃ block 1/')
+    directory_position = out.index("  in #{Dir.pwd}\n")
+    refute_nil banner_position
+    refute_nil directory_position
+    assert_operator banner_position, :<, directory_position
+  end
 
-def test_directory_line_reflects_cd_from_previous_block
-  doc = <<~ADOC
-    = Mover
+  def test_directory_line_reflects_cd_from_previous_block
+    doc = <<~ADOC
+      = Mover
 
-    [source,bash]
-    ----
-    cd /
-    ----
+      [source,bash]
+      ----
+      cd /
+      ----
 
-    [source,bash]
-    ----
-    pwd
-    ----
-  ADOC
-  script = convert doc
-  out, _status = run_script script, args: ['--yes']
-  assert_includes out, "  in /\n"
-end
+      [source,bash]
+      ----
+      pwd
+      ----
+    ADOC
+    script = convert doc
+    out, _status = run_script script, args: ['--yes']
+    assert_includes out, "  in /\n"
+  end
+
+  def test_blank_lines_become_echo_calls_in_runnable_block
+    doc = <<~ADOC
+      = Blanks
+
+      [source,bash]
+      ----
+      echo one
+
+      echo two
+      ----
+    ADOC
+    script = convert doc
+    content = File.read(script)
+    assert_includes content, "echo one\necho\necho two\n"
+    out, _status = run_script script, args: ['--yes']
+    assert_includes out, "    echo one\n    echo\n"
+    assert_includes out, "one\n\ntwo\n"
+  end
+
+  def test_blank_lines_inside_heredoc_are_kept
+    doc = <<~ADOC
+      = Heredoc
+
+      [source,bash]
+      ----
+      cat <<EOF
+      line above
+
+      line below
+      EOF
+      echo done
+      ----
+    ADOC
+    script = convert doc
+    content = File.read(script)
+    assert_includes content, "cat <<EOF\nline above\n\nline below\nEOF\n"
+    out, _status = run_script script, args: ['--yes']
+    assert_includes out, "line above\n\nline below\n"
+    assert_includes out, "done\n"
+  end
 
   def test_full_run_and_resume
     out, status = run_script @script, stdin: "\n\n"

@@ -579,6 +579,36 @@ class RunnableConverter
     line.empty? || line == print_call('') || line == print_prose_call('')
   end
 
+  # The block's source lines as they will run: blank lines become `echo`
+  # calls, so a blank in the document separates commands in the block's
+  # output too (a bare blank line in a function body prints nothing).
+  # Blank lines inside a heredoc body are data, not layout, and are kept.
+  # The code echo uses the same conversion, so what you see is what runs.
+  # The block's source lines as they will run: blank lines become `echo`
+  # calls, so a blank in the document separates commands in the block's
+  # output too (a bare blank line in a function body prints nothing).
+  # Blank lines inside a heredoc body are data, not layout, and are kept:
+  # the scan watches for a heredoc operator anywhere in a line, quoted or
+  # not, and holds until the closing delimiter line. The code echo uses
+  # the same conversion, so what you see is what runs.
+  def runnable_lines(block)
+    heredoc_pattern = %r{<<-?[[:space:]]*['"]?([A-Za-z_][A-Za-z0-9_]*)}
+    terminator = nil
+    block[:source].map do |line|
+      if terminator
+        terminator = nil if line == terminator
+        line
+      elsif (match = heredoc_pattern.match(line))
+        terminator = match[1]
+        line
+      elsif line.strip.empty?
+        'echo'
+      else
+        line
+      end
+    end
+  end
+
   def print_call(text)
     %(runnable_print #{RunnableAsciidoc.shell_single_quoted(text)})
   end
@@ -592,7 +622,7 @@ class RunnableConverter
 
   def block_definition(block)
     definition = +"#{RunnableAsciidoc.block_function_name(@index += 1)}() {\n"
-    block[:source].each do |line|
+    runnable_lines(block).each do |line|
       definition << line << "\n"
     end
     definition << "}\n"
@@ -781,7 +811,7 @@ class RunnableConverter
     SH
     blocks.each_with_index do |block, index|
       lines << "          #{RunnableAsciidoc.block_function_name(index + 1)})\n"
-      block[:source].each do |line|
+      runnable_lines(block).each do |line|
         lines << "            runnable_print_code #{RunnableAsciidoc.shell_single_quoted(line)}\n"
       end
       lines << "            ;;\n"
