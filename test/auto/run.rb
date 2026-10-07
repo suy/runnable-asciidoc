@@ -346,11 +346,13 @@ class ConversionTest < Minitest::Test
     refute_includes out, '[Enter]'
   end
 
-  def test_reset_flag_clears_progress
+  def test_reset_flag_clears_progress_and_reruns
     run_script @script, stdin: "\n\n"
-    _out, status = run_script @script, args: ['--reset']
+    out, status = run_script @script, args: ['--reset'], stdin: "\n\n"
     assert status.success?
-    refute_path_exists File.join(@dir, 'doc.sh.progress')
+    assert_path_exists File.join(@dir, 'doc.sh.progress')
+    assert_includes out, 'Progress cleared.'
+    assert_includes out, 'one'
   end
 
   def test_quitting_midway_saves_progress

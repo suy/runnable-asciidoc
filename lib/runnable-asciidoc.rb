@@ -838,7 +838,7 @@ class RunnableConverter
           if [ "$RUNNABLE_ASSUME_YES" -eq 1 ]; then
             [ "$status" -eq 0 ] && return 0 || return 2
           fi
-          printf '\\n'
+          runnable_rule
           runnable_print "  in $(runnable_working_directory)"
           runnable_ask '  '"$(runnable_paint runnable_color_bold '[r] re-run · [Enter] continue · [q] quit > ')"
           case $? in
@@ -882,7 +882,6 @@ class RunnableConverter
             --reset)
               rm -f "$(runnable_progress_file)"
               printf '%s\\n' 'Progress cleared.'
-              return 0
               ;;
             -h|--help) usage; return 0 ;;
             *) usage; return 2 ;;
